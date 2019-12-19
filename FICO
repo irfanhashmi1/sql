@@ -1,0 +1,17 @@
+SELECT
+	AF.install_media_source,
+	AF.channel_category,
+	AVG(CASE 
+			WHEN fico_insurance_score IN ('thin_file', 'no_use', 'no_score') OR fico_insurance_score IS NULL THEN NULL
+			ELSE fico_insurance_score::float END) AS fico_avg,
+	COUNT(*) AS num_records,
+	SUM(CASE 
+			WHEN fico_insurance_score IN ('thin_file', 'no_use', 'no_score') OR fico_insurance_score IS NULL THEN 1
+			ELSE 0
+		END) AS miss_num,
+	1-(miss_num/num_records::float) AS per_no_score
+FROM server_public.profile_rating_data PRD
+JOIN initial_rates IR ON IR.profile_rating_data_id = PRD.id
+JOIN account_facts AF ON AF.account_id = IR.account_id
+WHERE to_char(AF.account_timestamp, 'YYYY-MM-DD') BETWEEN '2019-01-01' AND '2019-10-31'
+GROUP BY 1, 2;
