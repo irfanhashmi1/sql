@@ -1,0 +1,54 @@
+WITH nbase AS
+(
+WITH profiles AS
+     (SELECT to_char(profile_timestamp,'yyyy-mm') AS MONTH,
+             sum(PROFILE*in_market_account) AS COUNT,
+             cast(Round(100.0*(sum(policy))/nullif(COUNT,0),1) AS nvarchar(5)) AS kpi,
+             af.install_media_source
+      FROM account_facts af
+      /*added*/WHERE af.channel_category ILIKE 'rd_partnership'
+      GROUP BY 1, 4) 
+      
+      SELECT to_char(profile_timestamp::date, 'yyyy-mm') AS date,
+      		 account_facts.install_media_source,
+             profiles.count,
+             profiles.kpi,
+             PROFILE*in_market_account AS im_profiles,
+             policy,
+             CASE
+                 WHEN (profiles.kpi < 2.0
+                       AND profiles.count > 50) THEN 0
+                 WHEN (profiles.kpi >= 10.0
+                       AND (profile_timestamp > '2019-11-18 00:00:00'
+                            AND profile_timestamp < '2020-01-01 00:00:00')) THEN 40
+                 WHEN (profile_timestamp > '2019-07-01 00:00:00' AND profile_timestamp < '2019-08-01 00:00:00') THEN 20
+                 WHEN (profile_timestamp < '2019-10-01 00:00:00') THEN 15
+                 WHEN (profile_timestamp > '2019-10-01 00:00:00'
+                       AND profiles.kpi >= 13.0
+                       AND profiles.count > 3000) THEN 25
+                 WHEN (profile_timestamp > '2019-10-01 00:00:00'
+                       AND profiles.kpi >= 12.0
+                       AND profiles.count > 999) THEN 20
+                 WHEN (profile_timestamp > '2019-10-01 00:00:00'
+                       AND profiles.kpi >= 11.0
+                       AND profiles.count > 250) THEN 17
+                 WHEN (profile_timestamp > '2019-10-01 00:00:00'
+                       AND profiles.kpi >= 10.0
+                       AND profiles.count > 50) THEN 16
+                 WHEN (profile_timestamp > '2019-10-01 00:00:00'
+                       AND profiles.kpi < 10.0
+                       OR profiles.count < 50) THEN 15
+                 ELSE 15
+             END AS spend
+  	 FROM account_facts
+   	LEFT JOIN PROFILES ON to_char(profile_timestamp,'yyyy-mm') = profiles.month AND account_facts.install_media_source = profiles.install_media_source
+   	 WHERE account_facts.channel_category ILIKE 'rd_partnership'
+     AND IM_PROFILES = 1
+)
+SELECT
+	nb.date,
+	nb.install_media_source,
+	SUM(nb.spend) AS expense
+FROM nbase nb
+GROUP BY 1, 2
+ORDER BY 2, 1;
