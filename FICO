@@ -15,3 +15,4 @@ JOIN initial_rates IR ON IR.profile_rating_data_id = PRD.id
 JOIN account_facts AF ON AF.account_id = IR.account_id
 WHERE to_char(AF.account_timestamp, 'YYYY-MM-DD') BETWEEN '2019-01-01' AND '2019-10-31'
 GROUP BY 1, 2;
+ 
