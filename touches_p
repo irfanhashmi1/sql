@@ -1,0 +1,176 @@
+WITH account_transfers AS (
+  SELECT DISTINCT
+    user_id,
+    account_id
+  FROM (
+    SELECT
+      users.id AS user_id,
+      users.account_id
+    FROM server_public.users
+    UNION ALL
+    SELECT
+      user_id,
+      old_account_id AS account_id
+    FROM server_public.account_transfers
+  )
+),
+fb_accounts AS (
+  SELECT *
+  FROM (
+    SELECT
+      date fb_date,
+      campaign_id,
+      account_id AS fb_account_id,
+      ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY date ASC)
+    FROM fb.insight
+    WHERE account_id NOT IN ('362115777753681', '481117272731641')
+   )
+  WHERE ROW_NUMBER = 1
+),
+
+appsflyer_contributors AS (
+  SELECT
+    u.id AS user_id,
+    NULLIF(install_time, '') AS install_time,
+    appsflyer_id,
+    NULLIF(attributed_touch_time, '') AS touch_time,
+    attributed_touch_type AS touch_type,
+    CASE WHEN category = 'rd_partnership' THEN COALESCE(partner, ai.media_source) ELSE ai.media_source END AS media_source,
+    campaign,
+    campaign_id,
+    adset,
+    adset_id,
+    ad,
+    ad_id,
+    sub_param_2 AS af_sub2,
+    channel,
+    state AS install_state
+  FROM public.appsflyer_installs ai
+  LEFT JOIN server_public.users u ON u.signup_apps_flyer_id = ai.appsflyer_id
+  LEFT JOIN mcm_public.media_source_categories msc ON COALESCE(ai.partner, ai.media_source) = msc.media_source AND attributed_touch_time::DATE BETWEEN COALESCE(msc.start_date, '2000-12-31'::DATE) AND COALESCE(msc.end_date, '3000-12-31'::DATE) 
+  WHERE (ai.media_source IS NOT NULL AND ai.media_source <> '' AND ai.media_source <> ' ') OR (category = 'rd_partnership' AND ai.partner IS NOT NULL AND ai.partner <> '' AND ai.partner <> ' ')
+),
+
+
+appsflyer_retargeting AS (
+  SELECT 
+    u.id AS user_id, 
+    NULLIF(install_time, '') AS install_time,
+    appsflyer_id,
+    NULLIF(attributed_touch_time, '') AS touch_time,
+    attributed_touch_type AS touch_type,
+    media_source,
+    campaign,
+    campaign_id,
+    adset,
+    adset_id,
+    ad,
+    ad_id,
+    sub_param_2 AS af_sub2,
+    channel,
+    state AS install_state
+  FROM public.appsflyer_retargeting_in_app_events ai
+  LEFT JOIN server_public.users u ON u.signup_apps_flyer_id = ai.appsflyer_id
+  WHERE media_source IS NOT NULL AND media_source <> '' AND media_source <> ' '
+),
+web_contributors AS (
+  SELECT DISTINCT *
+  FROM (
+    SELECT
+      wape.user_id,
+      NULL AS install_time,
+      ac.appsflyer_id,
+      COALESCE(touched_at, created_at)::VARCHAR(19) AS touch_time,
+      NULL AS touch_type,
+      wape.media_source,
+      wape.campaign,
+      wape.campaign_id,
+      wape.ad_set AS adset,
+      wape.ad_set_id AS adset_id,
+      wape.ad,
+      wape.ad_id,
+      wape.af_sub2,
+      wape.af_channel AS channel,
+      ac.install_state
+    FROM server_public.web_attribution_parameters_events wape
+    LEFT JOIN appsflyer_contributors ac ON wape.user_id = ac.user_id
+    WHERE wape.account_id IS NOT NULL AND wape.media_source IS NOT NULL AND wape.media_source <> ''
+    )
+),
+final_union AS (
+  SELECT * FROM appsflyer_contributors
+  UNION ALL
+  SELECT * FROM web_contributors
+  UNION ALL 
+  SELECT * FROM appsflyer_retargeting
+),
+final_table AS (
+  SELECT
+    appsflyer_id,
+    TRIM(acc.account_id) AS account_id,
+    install_time::TIMESTAMP AS install_timestamp,
+    touch_time::TIMESTAMP AS touch_timestamp,
+    MIN(LEAST(a.created_at, install_time::TIMESTAMP)) OVER (PARTITION BY COALESCE(acc.account_id, appsflyer_id)) AS funnel_created_timestamp,
+    first_profile.created_at as profile_timestamp, 
+    CASE WHEN category NOT ILIKE 'unattributed%' AND touch_timestamp <= funnel_created_timestamp THEN touch_timestamp ELSE NULL END AS pre_funnel_tms,
+    CASE WHEN category NOT ILIKE 'unattributed%' AND touch_timestamp <= a.created_at AND touch_timestamp > install_time::TIMESTAMP AND install_time IS NOT NULL THEN touch_timestamp ELSE NULL END AS pre_account_tms,
+    CASE WHEN category NOT ILIKE 'unattributed%' AND touch_timestamp <= profile_timestamp AND touch_timestamp > funnel_created_timestamp AND profile_timestamp IS NOT NULL THEN touch_timestamp ELSE NULL END AS pre_profile_tms,
+    CASE WHEN category NOT ILIKE 'unattributed%' AND touch_timestamp <= initial_policy.created_at AND touch_timestamp > profile_timestamp AND initial_policy.created_at IS NOT NULL THEN touch_timestamp ELSE NULL END AS pre_policy_tms,
+    CASE WHEN install_timestamp IS NOT NULL THEN
+    ROW_NUMBER() OVER (PARTITION BY acc.account_id ORDER BY install_timestamp)
+    ELSE NULL END AS account_install_row_number,
+    CASE WHEN install_timestamp IS NOT NULL THEN
+    ROW_NUMBER() OVER (PARTITION BY appsflyer_id ORDER BY install_timestamp)
+    ELSE NULL END AS appsflyer_install_row_number,
+    touch_type,
+    CASE WHEN LOWER(fu.media_source) LIKE 'facebook%' THEN
+        CASE WHEN fb_account_id = '596220253898092'
+            AND fb_date > '2018-04-01' THEN 'facebook_content'
+            WHEN fb_account_id = '329644191056733' THEN 'facebook_web'
+            ELSE 'Facebook Ads' 
+        END 
+    ELSE fu.media_source 
+    END AS media_source,
+    campaign,
+    fu.campaign_id,
+    adset,
+    adset_id,
+    ad,
+    ad_id,
+    af_sub2,
+    channel,
+    install_state
+  FROM final_union fu
+    LEFT JOIN account_transfers acc USING (user_id)
+    LEFT JOIN server_public.accounts a ON acc.account_id = a.id
+    LEFT JOIN initial_profiles first_profile ON a.id = first_profile.account_id
+    LEFT JOIN initial_policies initial_policy ON a.id = initial_policy.account_id
+    LEFT JOIN fb_accounts fb ON fu.campaign_id = fb.campaign_id
+    LEFT JOIN mcm_public.media_source_categories msc ON fu.media_source = msc.media_source AND touch_time::DATE BETWEEN COALESCE(msc.start_date, '2000-12-31'::DATE) AND COALESCE(msc.end_date, '3000-12-31'::DATE)  
+)
+
+SELECT
+  appsflyer_id,
+  account_id,
+  install_timestamp,
+  touch_timestamp,
+  funnel_created_timestamp,
+  CASE WHEN pre_funnel_tms IS NOT NULL THEN 1 ELSE 0 END AS pre_funnel_indicator,
+  account_install_row_number,
+  appsflyer_install_row_number,
+  CASE WHEN pre_funnel_indicator = 1 THEN ROW_NUMBER() OVER (PARTITION BY COALESCE(account_id, appsflyer_id) ORDER BY pre_funnel_tms DESC NULLS LAST) ELSE NULL END AS last_touch_funnel,
+  CASE WHEN pre_account_tms IS NOT NULL THEN ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY pre_account_tms DESC NULLS LAST) ELSE NULL END AS last_touch_account,
+  CASE WHEN pre_profile_tms IS NOT NULL THEN ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY pre_profile_tms DESC NULLS LAST) ELSE NULL END AS last_touch_profile,
+  CASE WHEN pre_policy_tms IS NOT NULL THEN ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY pre_policy_tms DESC NULLS LAST) ELSE NULL END AS last_touch_policy,
+  touch_type::VARCHAR(50) AS touch_type,
+  media_source::VARCHAR(50) AS payout_media_source,
+  campaign::VARCHAR(256) AS campaign,
+  campaign_id,
+  adset::VARCHAR(256) AS adset,
+  adset_id,
+  ad::VARCHAR(256) AS ad,
+  ad_id,
+  af_sub2::VARCHAR(256) AS af_sub2,
+  channel::VARCHAR(256) AS channel,
+  install_state::VARCHAR(256) AS install_state
+FROM final_table; 
